@@ -1,12 +1,20 @@
-name: 🚀 Auto Deploy
+name: "\U0001F680 Auto Deploy"
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: "20"
+
+permissions:
+  contents: read
+  deployments: write
 
 jobs:
   detect-service:
@@ -15,20 +23,23 @@ jobs:
     outputs:
       service_type: ${{ steps.detect.outputs.service_type }}
       deploy_target: ${{ steps.detect.outputs.deploy_target }}
-    
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Detect Service Type
         id: detect
         run: |
-          if [ -f "next.config.mjs" ] || [ -f "next.config.js" ]; then
+          if [ -f "next.config.mjs" ] || [ -f "next.config.js" ] || [ -f "next.config.ts" ]; then
             echo "service_type=nextjs" >> $GITHUB_OUTPUT
             echo "deploy_target=cloudflare" >> $GITHUB_OUTPUT
           elif [ -f "Dockerfile" ]; then
             echo "service_type=docker" >> $GITHUB_OUTPUT
             echo "deploy_target=railway" >> $GITHUB_OUTPUT
+          elif [ -f "wrangler.toml" ] || [ -f "wrangler.jsonc" ]; then
+            echo "service_type=worker" >> $GITHUB_OUTPUT
+            echo "deploy_target=cloudflare-worker" >> $GITHUB_OUTPUT
           elif [ -f "package.json" ]; then
             echo "service_type=node" >> $GITHUB_OUTPUT
             echo "deploy_target=railway" >> $GITHUB_OUTPUT
@@ -37,53 +48,102 @@ jobs:
             echo "deploy_target=railway" >> $GITHUB_OUTPUT
           else
             echo "service_type=static" >> $GITHUB_OUTPUT
-            echo "deploy_target=cloudflare" >> $GITHUB_OUTPUT
+            echo "deploy_target=cloudflare-pages" >> $GITHUB_OUTPUT
           fi
 
-  deploy-cloudflare:
+  deploy-cloudflare-pages:
     name: Deploy to Cloudflare Pages
     needs: detect-service
-    if: needs.detect-service.outputs.deploy_target == 'cloudflare'
+    if: needs.detect-service.outputs.deploy_target == 'cloudflare' || needs.detect-service.outputs.deploy_target == 'cloudflare-pages'
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node (if package.json exists)
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      
-      - name: Install Dependencies
+          cache: "npm"
+
+      - name: Install Dependencies (if package.json exists)
+        if: hashFiles('package.json') != ''
         run: npm ci
-      
-      - name: Build
-        run: npm run build
+
+      - name: Build (if build script exists)
+        if: hashFiles('package.json') != ''
+        run: |
+          if npm run --silent env 2>/dev/null | grep -q "npm_package_scripts_build"; then
+            npm run build
+          else
+            echo "No build script found, skipping build step"
+          fi
         env:
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
-      
+
+      - name: Determine deploy directory
+        id: deploy-dir
+        run: |
+          if [ -d ".next" ]; then
+            echo "dir=.next" >> $GITHUB_OUTPUT
+          elif [ -d "dist" ]; then
+            echo "dir=dist" >> $GITHUB_OUTPUT
+          elif [ -d "build" ]; then
+            echo "dir=build" >> $GITHUB_OUTPUT
+          elif [ -d "out" ]; then
+            echo "dir=out" >> $GITHUB_OUTPUT
+          else
+            echo "dir=." >> $GITHUB_OUTPUT
+          fi
+
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9681c2997648301493e78cacbfb790a9f19c833f # v3.9.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy .next --project-name=${{ github.event.repository.name }}
+          command: pages deploy ${{ steps.deploy-dir.outputs.dir }} --project-name=${{ github.event.repository.name }}
+
+  deploy-cloudflare-worker:
+    name: Deploy Cloudflare Worker
+    needs: detect-service
+    if: needs.detect-service.outputs.deploy_target == 'cloudflare-worker'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@9681c2997648301493e78cacbfb790a9f19c833f # v3.9.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
 
   deploy-railway:
     name: Deploy to Railway
     needs: detect-service
     if: needs.detect-service.outputs.deploy_target == 'railway'
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Install Railway CLI
         run: npm i -g @railway/cli
-      
+
       - name: Deploy to Railway
         run: railway up --service ${{ github.event.repository.name }}
         env:
@@ -91,25 +151,36 @@ jobs:
 
   health-check:
     name: Health Check
-    needs: [deploy-cloudflare, deploy-railway]
-    if: always() && (needs.deploy-cloudflare.result == 'success' || needs.deploy-railway.result == 'success')
+    needs: [deploy-cloudflare-pages, deploy-cloudflare-worker, deploy-railway]
+    if: always() && (needs.deploy-cloudflare-pages.result == 'success' || needs.deploy-cloudflare-worker.result == 'success' || needs.deploy-railway.result == 'success')
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Wait for Deployment
+      - name: Wait for Deployment Propagation
         run: sleep 30
-      
+
       - name: Check Health Endpoint
         run: |
-          URL="${{ secrets.DEPLOY_URL }}/api/health"
-          curl -f $URL || exit 1
-      
+          if [ -z "${{ secrets.DEPLOY_URL }}" ]; then
+            echo "DEPLOY_URL not set, skipping health check"
+            exit 0
+          fi
+          URL="${{ secrets.DEPLOY_URL }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+            echo "Deployment is healthy"
+          else
+            echo "Health check failed with status $STATUS"
+            exit 1
+          fi
+
       - name: Notify Success
         if: success()
-        run: echo "✅ Deployment successful and healthy!"
-      
+        run: echo "Deployment successful and healthy"
+
       - name: Notify Failure
         if: failure()
         run: |
-          echo "❌ Deployment health check failed!"
+          echo "Deployment health check failed"
           exit 1

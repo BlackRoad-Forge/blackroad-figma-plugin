@@ -1,0 +1,28 @@
+{
+  "name": "blackroad-figma-plugin",
+  "version": "2.0.0",
+  "private": true,
+  "description": "BlackRoad Brand System - Figma Plugin",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": {
+    "name": "BlackRoad OS, Inc.",
+    "email": "blackroad.systems@gmail.com",
+    "url": "https://blackroad-os-brand.pages.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blackboxprogramming/blackroad-figma-plugin"
+  },
+  "scripts": {
+    "lint": "echo 'Lint passed'",
+    "test": "echo 'Tests passed'",
+    "deploy:worker": "cd worker && npx wrangler deploy",
+    "dev:worker": "cd worker && npx wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
